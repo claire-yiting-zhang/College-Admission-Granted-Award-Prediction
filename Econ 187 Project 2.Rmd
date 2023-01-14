@@ -1,0 +1,485 @@
+---
+title: "Econ 187 Project 2"
+author: "Shannan Liu Christina Zhang"
+date: "5/15/2022"
+fontfamily: mathpazo
+output:
+  pdf_document:
+    toc: true
+  fig_caption: yes
+  highlight: haddock
+  number_sections: true
+  df_print: paged
+fontsize: 10.5pt
+editor_options:
+chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(GGally)
+library(caret)
+library(ggplot2)
+library(car)
+library(pls)
+library(glmnet)
+library(vip)
+library(dplyr)
+library(leaps)
+library(gam)
+library(splines)
+library(MASS)
+library(boot)
+```
+
+\newpage
+
+## Acquiring Data & Data Preprocessing
+```{r}
+df = read_csv('Awarded Grants.csv')
+
+# initially we have 46 variables
+print(length(names(df)))
+names(df)
+```
+  
+- Our target variable is `Financial Assistance`
+- A lot of the variables are permutations of each other or not useful. After inspecting the data, we've identified that the following variables can be removed:
+  - 'Grantee Address', Grantee County Name', 'Grantee City', 'Grant Number', Grantee Name', 'Grant Serial Number', 'Project Period Start Date', 'Project Period Start Date Text String', 'Grant Project Period End Date', 'Grantee State Abbreviation', 'Grant Project Period End Date Text', 'Complete County Name','Grant Program Director Name', 'Grant Program Director Phone Number', 'Congressional District Name', 'State and County Federal Information Processing Standard Code', 'Data Warehouse Record Create Date', 'Data Warehouse Record Create Date Text', 'Uniform Data System Grant Program Description', 'Abstract','DUNS Number','Name of U.S. Senator Number One', 'Name of U.S. Senator Number Two', 'HHS Region Number','U.S. Congressional Representative Name', 'Grantee ZIP Code','Unique Entity Identifier', 'State FIPS Code', 'Grant Program Director E-mail', 'Grant Activity Code', 'Grant Program Name'
+
+```{r}
+# Drop the variables listed above
+drops <- c('Grantee Address', 'Grantee County Name',
+'Grantee City', 'Grant Number', 'Grantee Name',
+'Grant Serial Number', 'Project Period Start Date', 
+'Project Period Start Date Text String', 
+'Grant Project Period End Date', 'Grantee State Abbreviation', 
+'Grant Project Period End Date Text', 
+'Complete County Name','Grant Program Director Name', 
+'Grant Program Director Phone Number', 'Congressional District Name', 
+'State and County Federal Information Processing Standard Code', 
+'Data Warehouse Record Create Date', 'Data Warehouse Record Create Date Text', 
+'Uniform Data System Grant Program Description', 'Abstract',
+'DUNS Number','Name of U.S. Senator Number One', 
+'Name of U.S. Senator Number Two', 'HHS Region Number',
+'U.S. Congressional Representative Name', 'Grantee ZIP Code',
+'Unique Entity Identifier','State FIPS Code',
+'Grant Program Director E-mail','Grant Activity Code',
+'Grant Program Name')
+df <- df[ , !(names(df) %in% drops)]
+
+#  now we have 15 variables
+print(length(names(df)))
+names(df)
+```
+
+Now, we can deal with any missing values in our target variable, if any.
+
+```{r}
+# check length of our data
+cat("Length of data:",length(df$`Financial Assistance`),'\n')
+
+# check if our target variable has any missing values
+cat("Missing values in our target var:",sum(is.na(df['Financial Assistance'])))
+```
+
+Great, there are no missing values in our target. The next step is to split our data into a training and testing set. Then we'll deal with any general NA values in our dataset.
+
+```{r}
+# great, now we can train-test-split
+set.seed(42)
+train_index = createDataPartition(df$`Financial Assistance`, 
+                                  p = .7, list = FALSE)
+train <- df[train_index,]
+test  <- df[-train_index,]
+
+# drop columns with high number of NA values
+# define "high" as >20% null values
+drops <- c()
+# find the columns with a high number of NAs
+for (col in names(train)){
+  if (sum(is.na(df[col])) > 0.2*nrow(df[col])){
+    drops <- c(drops,col)
+  }
+}
+# drop those columns from our data
+train <- train[ , !(names(train) %in% drops)]
+test <- test[ , !(names(test) %in% drops)]
+
+# find if there are any variables that don't 
+# give any information i.e. 0 variance
+# this would be the case if a column only 
+# has 1 unique value
+cat("In the training set these variables have 0 variance:",names(sapply(lapply(train, unique), 
+length)[sapply(lapply(train, unique), length) == 1]),"\n")
+```
+
+None of our variables have 0 variance, so we can move on to processing our data. In other words, scaling our numeric data and encoding the categorical data.
+
+We'll also impute any missing values as needed.
+
+```{r}
+# data preprocessing
+# split into train-test sets
+drops <- c('Financial Assistance')
+X_train <-train[ , !(names(train) %in% drops)]
+y_train <- train$`Financial Assistance`
+X_test <- test[ , !(names(test) %in% drops)]
+y_test <- test$`Financial Assistance`
+
+# handling numeric data
+# (1) impute > median
+# (2) scale 
+X_train_scaled <- X_train %>% 
+  mutate_if(is.numeric,
+            function(x) ifelse(is.na(x),
+                               median(x,na.rm=T),x)) %>% 
+  mutate_if(is.numeric, function(x) scale(x))
+
+X_test_scaled <- X_test %>% 
+  mutate_if(is.numeric,
+            function(x) ifelse(is.na(x),
+                               median(x,na.rm=T),x)) %>% 
+  mutate_if(is.numeric, function(x) scale(x))
+
+# handling categorical data
+# (1) impute with mode
+X_train_scaled <- X_train_scaled %>% 
+  mutate_if(is.character,
+            function(x) ifelse(is.na(x),
+                               mode(x),x))
+X_test_scaled <- X_test_scaled %>% 
+  mutate_if(is.character,
+            function(x) ifelse(is.na(x),
+                               mode(x),x))
+
+# dummy vars
+dummy <- dummyVars(" ~ .", 
+                   data = X_train_scaled)
+X_train_scaled <- data.frame(predict(dummy, 
+                                     newdata = X_train_scaled))
+X_test_scaled <- data.frame(predict(dummy, 
+                                    newdata = X_test_scaled))
+
+# putting all the data back together for easier modelling 
+train_scaled <- X_train_scaled
+train_scaled['Financial Assistance'] <- y_train
+
+test_scaled <- X_test_scaled 
+test_scaled['Financial Assistance'] <- y_test
+
+# check to see if the dummy variable creation process created
+# any discrepancies in our training and testing data
+cat(length(names(train_scaled)), 
+    length(names(test_scaled)))
+```
+
+There is an extra variable in our training set that isn't in our testing set.
+
+```{r}
+cat("Missing Column(s):",names(train_scaled)[
+  !names(train_scaled) %in% names(test_scaled)])
+```
+
+Since it's a dummy variable column, we can just create a new zero-column in our test set.
+
+```{r}
+test_scaled['X.Congressional.District.Number.42'] = 0
+
+# check again just in case
+cat("Missing Column(s):",names(train_scaled)[
+  !names(train_scaled) %in% names(test_scaled)])
+```
+
+Great, our datasets match.
+
+Now that our data is ready, we can begin fitting our models to predict the amount of financial assistance given for healthcare services in underserved populations of the U.S. 
+
+\newpage
+
+## GAMs
+```{r}
+library(splines)
+library(gam)
+# get non-categorical columns to make our predictions
+n_num <- c()
+for (col in names(train_scaled)){
+  if (nrow(unique(train_scaled[col])) > 2) {
+    n_num <- append(n_num,col)
+  }
+}
+
+# get list of categorical predictor variables
+n_cat <- names(train_scaled[,!(
+  names(train_scaled) %in% n_num)]) 
+
+# remove "Financial Assistance", our target, 
+# from this list of non-categorical 
+# predictor variables
+n_num <- n_num[-length(n_num)] 
+
+# Create a GAM formula using natural splines 
+# on our non-categorical variables
+form1 <- as.formula(                     
+  paste("`Financial Assistance`~", 
+        paste(paste0("ns(",
+                     paste0(n_num),
+                     sep=", 4)"), 
+              collapse = " + ")))
+
+# check what our formula looks like
+form1
+```
+
+From this, we can see that there are only 3 non-categorical variables in this dataset. We can use there 3 variables to create our first GAM model. Our second GAM model will then incorporate all the other categorical variables as well.
+
+### GAM 1  
+```{r}
+# build model
+gam1 <- gam(form1, data = train_scaled)
+
+# construct plots of X vs ns(X,4)
+par(mfrow = c(1, 3))
+plot(gam1, se = TRUE, col = "blue")
+```
+
+We observe that there are strong nonlinearities in our numeric variables being captured by the splines, which is great! Our model summary below affirms that all three variables are important. This is especially evidenced in the `Anova for Nonparametric Effects` section of the summary.
+
+```{r}
+summary(gam1)
+```
+
+Now, let's build our second model
+
+### GAM 2  
+In this model, we're also going to utilise all of our categorical variables.
+
+```{r}
+form2 <- as.formula(                     
+  paste("`Financial Assistance`~", 
+        paste(paste(paste0("ns(",
+                           paste0(n_num),
+                           sep=", 4)"), 
+                    collapse = " + "),
+              paste0(n_cat,
+                     collapse="+"),
+              sep = "+")))
+
+gam2 <- gam(form2, data = train_scaled)
+
+# check which model is better
+anova(gam1, gam2, test = "F")
+```
+
+From the results of the Anova test above, we can see that a GAM including categorical variables is better than a GAM without the categorical data. We can test this information below by examining each model's fit vs residuals plot. We can also compare their prediction values on the test set to see if there are any statistically significant differences between each model's predictions.
+
+### Fit vs Residuals Plots
+
+From the plots below, we can see that our second GAM model has better performance when fitting larger values while our first GAM model performs better when predicting smaller fitted values. Still, the second GAM model appears to fit better overall.
+
+```{r}
+library(broom)
+df <- augment(gam1)
+p1 <- ggplot(df, aes(x = .fitted, 
+                     y = .resid)) + 
+  geom_point() + 
+  geom_smooth(method=lm , 
+              color="red", 
+              fill="#0000FF", se=TRUE) 
+p1 + ggtitle("GAM1 Fit vs Residuals Plot") + 
+  xlab("Fitted Values") + 
+  ylab("Residuals")
+
+df <- augment(gam2)
+p1 <- ggplot(df, aes(x = .fitted, 
+                     y = .resid)) + 
+  geom_point() + 
+  geom_smooth(method=lm , 
+              color="red", 
+              fill="#0000FF", se=TRUE) 
+p1 + ggtitle("GAM2 Fit vs Residuals Plot") + 
+  xlab("Fitted Values") + 
+  ylab("Residuals")
+```
+
+### Model Predictions & Performance
+Now we can move onto evaluating the performance of our models using metrics such as RMSE and MAE.
+
+```{r}
+preds1 <- predict(gam1, 
+                  newdata = test_scaled)
+preds2 <- predict(gam2, 
+                  newdata = test_scaled)
+
+# RMSE
+cat("RMSE for GAM1:",sqrt(
+  mean((preds1 - y_test)^2)),
+  "\n")
+cat("RMSE for GAM2:",sqrt(
+  mean((preds2 - y_test)^2)),
+  "\n")
+
+# MAE
+cat("MAE for GAM1:",mean(
+  abs(preds1 - y_test)),
+  "\n")
+cat("MAE for GAM2:",mean(
+  abs(preds2 - y_test)))
+```
+
+We can see that our second GAM model that includes all the categorical variables performs the best on our dataset. Thus, this is the best model, and the one we will be comparing with all of our other models.
+
+
+# Decision Tree
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls(all=TRUE))
+
+library(tree)
+library(rpart)
+library(rpart.plot)
+library(ISLR2)
+library(randomForest)
+library(gbm)
+
+```
+
+
+```{r}
+
+wine<-read.csv("winequality-red.csv")
+
+summary(wine)
+```
+
+## Regression Tree
+
+
+
+## Classification Tree
+
+
+
+## Random Forest 
+
+```{r}
+set.seed(123)
+
+train <- sample(1:nrow(wine), nrow(wine) / 2)
+wine.test <- wine[-train, "quality"]
+
+bag.wine <- randomForest(quality ~ ., data =wine,
+    subset = train, mtry = 11, importance = TRUE)
+# mytry=16 indicates all 11 predictors should be considered for each split of the tree
+bag.wine
+
+
+```
+
+```{r}
+
+yhat.bag <- predict(bag.wine, newdata = wine[-train, ])
+plot(yhat.bag, wine.test)
+abline(0, 1)
+
+```
+
+```{r}
+
+mean((yhat.bag - wine.test)^2)
+#The test set MSE associated with the bagged regression tree is 0.363
+
+```
+
+```{r}
+
+#change the number of trees
+
+rf.wine <- randomForest(quality ~ ., data =wine,
+    subset = train, mtry = 11, ntree=25)
+yhat.rf <- predict(rf.wine, newdata = wine[-train, ])
+mean((yhat.rf - wine.test)^2)
+#The test set MSE associated with the random forest is 0.378
+
+```
+
+```{r}
+#try a smaller value of mtry
+
+rf.wine <- randomForest(quality ~ ., data =wine,
+    subset = train, mtry = 5)
+yhat.rf <- predict(rf.wine, newdata = wine[-train, ])
+mean((yhat.rf - wine.test)^2)
+#The test set MSE associated with random forest is 0.347
+```
+The MSE improved. Random forest yields a better MSE than bagging in this case.
+
+```{r}
+#check the importance of the variables
+importance(rf.wine)
+
+#plot the importance
+varImpPlot(rf.wine)
+
+
+```
+The plot indicates that across all tress considered in random forest, the percent alcohol content of the wine (alcohol) and wine additive that contribute to SO2 levels (sulfates) are the two most important variables.
+
+## Boosting
+
+```{r}
+
+
+set.seed(123)
+boost.wine <- gbm(quality ~ ., data = wine[train, ],
+    distribution = "gaussian", n.trees = 5000,
+    interaction.depth = 4)
+#use 5000 trees
+#interaction.depth = 4 limits the depth of each tree
+
+```
+
+```{r}
+summary(boost.wine)
+```
+
+alcohol and volatile.acidity are by far the most important variables.
+
+```{r}
+#partial dependence plot
+
+par(mfrow=c(1,2)) 
+plot(boost.wine, i = "alcohol")
+plot(boost.wine, i = "volatile.acidity")
+```
+
+```{r}
+#predict
+
+yhat.boost <- predict(boost.wine,
+    newdata = wine[-train, ], n.trees = 5000)
+mean((yhat.boost - wine.test)^2)
+#The test set MSE associated with boosting is 0.465
+```
+
+```{r}
+#Try a different shrinking parameter lambda 
+boost.wine <- gbm(quality ~ ., data = wine[train, ],
+    distribution = "gaussian", n.trees = 5000,
+    interaction.depth = 4, shrinkage = 0.03, verbose = F)
+yhat.boost <- predict(boost.wine,
+    newdata = wine[-train, ], n.trees = 5000)
+mean((yhat.boost - wine.test)^2)
+
+```
+
+In this case, $\lambda=0.2$ lead to a better MSE than when $\lambda=0.01$ .
+
+
+
+
+
+
+
