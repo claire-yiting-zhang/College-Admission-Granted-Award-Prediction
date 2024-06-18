@@ -1,4 +1,5 @@
-# Model-Fitting-Project
+# UCLA Econ 187 Project 2
+
 
 Using the Grants Awarded dataset, we analyzed the factors that affect grants awarded for college admission. We also investigated the model performance and found that GAM generates the best accuracy.
 
